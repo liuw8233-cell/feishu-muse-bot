@@ -1,55 +1,60 @@
 # 飞书 x Muse 最小接入方案
 
-## 架构
-飞书（收发消息） → 本服务 `/webhook` → Muse API → 回复写回飞书
+## 架构（长连接模式）
+飞书（WebSocket 长连接推送事件） → 本服务 → 大模型 API（OpenAI 兼容） → 引用原消息回复
 
-## 部署到 Sealos（推荐，免费额度够跑）
+**长连接模式不需要公网域名、不需要 HTTPS、不需要反向代理/内网穿透**，
+服务只要能出站访问公网就能跑。
 
-1. 把本目录推到你的 GitHub 仓库（已含 Dockerfile）
-2. 登录 Sealos Cloud → 桌面 → 打开「应用管理」（App Launchpad）→ 新建应用
-3. 选择从源码仓库部署，填你的 GitHub 仓库地址
-4. 表单里配置：
-   - 容器暴露端口：`8000`，并开启外网访问
-   - 环境变量：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`MUSE_API_URL`、`MUSE_API_KEY`
-   - CPU/内存选最小档即可（如 0.5C / 512M）
-5. 点部署，等状态变 Running，复制它给的公网地址
-6. 回飞书开放平台 → 事件订阅 → 请求地址填 `https://你的sealos域名/webhook`，
-   添加事件 `im.message.receive_v1` 后保存（URL 校验会自动通过）
-7. 发布应用版本，加到群里 @ 它测试
+## 飞书侧配置（两种部署方式通用）
 
-注意：Sealos 按量计费，新用户一般有免费试用额度，跑这个小服务很省；
-`MUSE_API_URL` 没准备好可以先留空占位，飞书校验能过，只是对话回复会报错，
-等接口 ready 了在应用详情页更新环境变量后重部署即可。
+1. 飞书开放平台 → 你的应用 →「事件订阅」→ 订阅方式选「**使用长连接接收事件**」
+2. 权限管理确认三个权限：
+   - `im:message.p2p_msg:readonly`（收私聊）
+   - `im:message.group_at_msg:readonly`（群里被 @ 时收消息）
+   - `im:message:send_as_bot`（以机器人身份发消息）
+   - 可选加 `im:resource`（收图片/文件）
+3. 确认已开启「机器人」应用能力
+4. 「事件订阅」里添加事件 `im.message.receive_v1`（加密策略保持关闭）
+5. **去「版本管理与发布」创建并发布新版本**（改了订阅方式/权限必须重新发布才生效）
+6. 把机器人拉进群，@ 它说话即可
 
-## 本地/自有服务器部署
+> ⚠️ 同一时间只能用一种订阅模式（长连接 或 回调），不要两个都开，否则会重复收消息。
+
+## 自有服务器部署（推荐）
 
 一键脚本（Ubuntu/Debian，国内 pip 源、systemd 开机自启都配好了）：
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/liuw8233-cell/feishu-muse-bot/main/deploy.sh
 bash deploy.sh
 ```
-脚本会提示你填写 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（Muse 接口地址可先留空）。
-跑完后把域名反代到 `127.0.0.1:8000` 并配好 HTTPS（宝塔面板一键 SSL 最省事），
-再去飞书开放平台把事件订阅地址填成 `https://你的域名/webhook` 即可。
+脚本会提示你填写 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，
+以及大模型配置（`MUSE_API_URL` / `MUSE_API_KEY` / `MUSE_MODEL`，三选一）：
+- DeepSeek：`https://api.deepseek.com` + `deepseek-chat`
+- Kimi：`https://api.moonshot.cn` + `kimi-k2`
+- 通义：`https://dashscope.aliyuncs.com/compatible-mode/v1` + `qwen-plus`
 
-手动部署：
-1. 飞书开放平台 → 自建应用 → 开通「机器人」能力
-2. 「事件订阅」添加 `im.message.receive_v1`，请求地址填 `https://你的域名/webhook`
-   - 首次保存时飞书会发 `url_verification`，本模板已处理
-3. 部署本服务：
-   ```bash
-   pip install -r requirements.txt
-   cp .env.example .env   # 填好你的密钥
-   uvicorn app:app --host 0.0.0.0 --port 8000
-   ```
-4. 把应用发布并加到群里，@ 它说话即可
+跑完即用，不需要域名和 HTTPS。
+
+## 部署到 Sealos（备选）
+
+长连接模式下 Sealos 不是必需的；如果想用，流程同上，
+只是把代码换成容器方式跑（Dockerfile 已提供），环境变量照填即可。
+
+## 手动部署
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # 填好你的密钥和大模型配置
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
 
 ## 安全提醒
 - App Secret 只放在环境变量 / 服务器的密钥管理里，不要写进代码、不要发到聊天记录
 - 如果 Secret 已经发到过聊天，建议去飞书后台重置一次
 
-## 待办（按你的 Muse 接口改）
-- `ask_muse()` 目前是占位实现，换成你真实的 Muse 调用即可
+## 待办
+- 无，`ask_muse()` 已支持所有 OpenAI 兼容接口
 
 ## 更新记录
-- 2026-10-12：修复回复逻辑——改用 `POST /im/v1/messages/:message_id/reply` 引用原消息回复（之前版本用 `im/v1/messages` + `receive_id_type=open_message_id`，该参数值飞书不支持，测试时会报参数错误）；新增消息去重（飞书会重试推送）、@ 标记剥离、token 缓存。
+- 2026-10-12：**改走 WebSocket 长连接模式**（`lark-oapi`），不再需要公网域名/HTTPS/反向代理；飞书侧把事件订阅改为「使用长连接接收事件」并重新发布版本；`ask_muse()` 改为 OpenAI 兼容接口，支持 DeepSeek/Kimi/通义。
+- 2026-10-12：修复回复逻辑——改用 `POST /im/v1/messages/:message_id/reply` 引用原消息回复；新增消息去重、@ 标记剥离、token 缓存。

@@ -1,23 +1,29 @@
-# 飞书 x Muse 中转服务（FastAPI 模板）
-# 所有密钥从环境变量读取，不要写死在代码里
+# 飞书 x Muse 中转服务（长连接模式）
+#
+# 飞书侧把事件订阅设为「使用长连接接收事件」后，服务主动连飞书收消息，
+# 不需要公网域名、不需要 HTTPS、不需要反向代理/内网穿透。
+# 所有密钥从环境变量读取，不要写死在代码里。
 import os
 import json
 import time
+import threading
 from collections import deque
 
 import requests
-from fastapi import FastAPI, Request
+import lark_oapi as lark
+from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+from fastapi import FastAPI
 
 app = FastAPI()
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
-# 你的 Muse 接口（按你实际用的填）
+# OpenAI 兼容的大模型接口
 MUSE_API_URL = os.environ.get("MUSE_API_URL", "").rstrip("/")
 MUSE_API_KEY = os.environ.get("MUSE_API_KEY", "")
 MUSE_MODEL = os.environ.get("MUSE_MODEL", "deepseek-chat")
 
-# 飞书会重试推送事件，用 message_id 去重（保留最近 1000 条）
+# 飞书可能重复推送事件，用 message_id 去重（保留最近 1000 条）
 _seen_messages = deque(maxlen=1000)
 
 # tenant_access_token 有效期约 2 小时，简单缓存避免每次都换
@@ -43,7 +49,7 @@ def get_tenant_token() -> str:
 def ask_muse(user_text: str) -> str:
     """调用 OpenAI 兼容的大模型接口。
     DeepSeek: MUSE_API_URL=https://api.deepseek.com, MUSE_MODEL=deepseek-chat
-    Kimi:     MUSE_API_URL=https://api.moonshot.cn, MUSE_MODEL=kimi-k2 / moonshot-v1-8k
+    Kimi:     MUSE_API_URL=https://api.moonshot.cn, MUSE_MODEL=kimi-k2
     通义:     MUSE_API_URL=https://dashscope.aliyuncs.com/compatible-mode/v1, MUSE_MODEL=qwen-plus
     """
     r = requests.post(
@@ -75,54 +81,79 @@ def reply_feishu(message_id: str, text: str) -> None:
     r.raise_for_status()
 
 
-@app.post("/webhook")
-async def webhook(req: Request):
-    body = await req.json()
+def process_message(message_id: str, message_type: str, content_json: str, mentions) -> None:
+    """处理一条消息：去重 → 只收文本 → 去 @ 标记 → 问大模型 → 引用回复"""
+    if not message_id or message_id in _seen_messages:
+        return
+    _seen_messages.append(message_id)
 
-    # 1. 飞书首次配置事件订阅时的 URL 校验
-    if body.get("type") == "url_verification":
-        return {"challenge": body["challenge"]}
+    if "text" not in str(message_type):
+        return
 
-    # 2. 消息事件
-    header = body.get("header", {})
-    if header.get("event_type") == "im.message.receive_v1":
-        event = body.get("event", {})
-        msg = event.get("message", {})
-        message_id = msg.get("message_id", "")
+    try:
+        user_text = json.loads(content_json or "{}").get("text", "")
+    except Exception:
+        return
 
-        # 去重：飞书可能重复推送同一条消息
-        if not message_id or message_id in _seen_messages:
-            return {"ok": True}
-        _seen_messages.append(message_id)
+    # 群聊 @ 机器人时，去掉 @ 标记再发给大模型
+    for m in mentions or []:
+        key = m.get("key", "") if isinstance(m, dict) else getattr(m, "key", "")
+        if key:
+            user_text = user_text.replace(key, "")
+    user_text = user_text.strip()
+    if not user_text:
+        return
 
-        # 只处理文本消息
-        if msg.get("message_type") != "text":
-            return {"ok": True}
-
-        content = json.loads(msg.get("content", "{}"))
-        user_text = content.get("text", "")
-
-        # 群聊 @ 机器人时，去掉 @ 标记再发给 Muse
-        for mention in msg.get("mentions") or []:
-            key = mention.get("key", "")
-            if key:
-                user_text = user_text.replace(key, "")
-        user_text = user_text.strip()
-        if not user_text:
-            return {"ok": True}
-
-        if not MUSE_API_URL or not MUSE_API_KEY:
-            answer = "我还没接上大模型，配置好 API Key 后我就能聊天了"
-        else:
-            try:
-                answer = ask_muse(user_text)
-            except Exception as e:  # 别让异常吞掉飞书的回调
-                answer = f"调用大模型出错了：{e}"
-
+    if not MUSE_API_URL or not MUSE_API_KEY:
+        answer = "我还没接上大模型，配置好 API Key 后我就能聊天了"
+    else:
         try:
-            reply_feishu(message_id, answer)
-        except Exception as e:
-            # 回复失败就记下来，别让飞书重试导致重复调用 Muse
-            print(f"[feishu] reply failed: {e}")
+            answer = ask_muse(user_text)
+        except Exception as e:  # 别让异常影响长连接
+            answer = f"调用大模型出错了：{e}"
 
-    return {"ok": True}
+    try:
+        reply_feishu(message_id, answer)
+    except Exception as e:
+        print(f"[feishu] reply failed: {e}", flush=True)
+
+
+def _on_message(data: P2ImMessageReceiveV1) -> None:
+    """长连接收到 im.message.receive_v1 事件。丢到线程里处理，避免阻塞心跳。"""
+    msg = data.event.message
+    mentions = [{"key": getattr(m, "key", "")} for m in (msg.mentions or [])]
+    threading.Thread(
+        target=process_message,
+        args=(msg.message_id, msg.message_type, msg.content, mentions),
+        daemon=True,
+    ).start()
+
+
+def _run_ws() -> None:
+    # verification_token / encrypt_key 传空 = 加密策略关闭，和飞书后台保持一致
+    handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_im_message_receive_v1(_on_message)
+        .build()
+    )
+    cli = lark.ws.Client(
+        FEISHU_APP_ID,
+        FEISHU_APP_SECRET,
+        event_handler=handler,
+        log_level=lark.LogLevel.INFO,
+    )
+    print("[feishu] 长连接启动，等待消息…", flush=True)
+    cli.start()
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        print("[feishu] 未配置 FEISHU_APP_ID/SECRET，长连接未启动", flush=True)
+        return
+    threading.Thread(target=_run_ws, daemon=True).start()
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "mode": "long-connection"}

@@ -91,16 +91,14 @@ else
 fi
 
 echo
-echo "本地自检（应返回 challenge）："
-curl -s -X POST http://127.0.0.1:8000/webhook \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"url_verification","challenge":"hello"}'; echo
+echo "本地自检（应返回 ok）："
+curl -s http://127.0.0.1:8000/health; echo
 echo
-echo "下一步："
-echo "  1. 把域名解析到这台服务器，用反向代理指向 127.0.0.1:8000 并配好 HTTPS"
-echo "    （宝塔面板建站 + 反向代理 + 一键 SSL 最省事）"
-echo "  2. 去飞书开放平台 → 事件订阅 → 请求地址填 https://你的域名/webhook"
-echo "  3. 添加事件 im.message.receive_v1，保存，发布版本，加群测试"
+echo "下一步（长连接模式，不需要域名/HTTPS/反向代理）："
+echo "  1. 去飞书开放平台 → 事件订阅 → 订阅方式改成「使用长连接接收事件」"
+echo "  2. 确认权限：im:message.p2p_msg:readonly、im:message.group_at_msg:readonly、im:message:send_as_bot"
+echo "  3. 去「版本管理与发布」创建并发布新版本（改了订阅方式必须重新发布）"
+echo "  4. 把机器人拉进群 @ 它说话即可"
 echo
 echo "常用命令："
 echo "  查看日志: sudo journalctl -u $SERVICE -f"
