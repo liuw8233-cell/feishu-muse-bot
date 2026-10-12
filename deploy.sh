@@ -21,12 +21,24 @@ command -v git >/dev/null 2>&1 || sudo apt-get install -y -qq git
 command -v curl >/dev/null 2>&1 || sudo apt-get install -y -qq curl
 
 echo "== 2/5 拉取代码 =="
-if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" pull --ff-only
-else
+# GitHub 直连不稳定时自动走加速镜像
+git config --global http.lowSpeedLimit 1000 2>/dev/null || true
+git config --global http.lowSpeedTime 60 2>/dev/null || true
+try_clone() {
+  rm -rf "$APP_DIR"
   sudo mkdir -p "$APP_DIR"
   sudo chown "$(id -un)":"$(id -gn)" "$APP_DIR"
-  git clone --depth 1 "$REPO" "$APP_DIR"
+  git clone --depth 1 "$1" "$APP_DIR"
+}
+if [ -d "$APP_DIR/.git" ]; then
+  git -C "$APP_DIR" pull --ff-only || try_clone "$REPO"
+else
+  if ! try_clone "$REPO"; then
+    echo "直连 GitHub 失败，尝试加速镜像..."
+    try_clone "https://gh-proxy.com/https://github.com/liuw8233-cell/feishu-muse-bot.git" || \
+    try_clone "https://mirror.ghproxy.com/https://github.com/liuw8233-cell/feishu-muse-bot.git" || \
+    { echo "❌ 代码拉取失败，请检查服务器网络后重试"; exit 1; }
+  fi
 fi
 
 echo "== 3/5 安装依赖（清华 pip 源）=="
