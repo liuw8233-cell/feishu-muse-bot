@@ -51,7 +51,7 @@ if [ ! -f "$ENV_FILE" ]; then
   echo "首次部署，请输入飞书应用信息："
   read -rp "FEISHU_APP_ID: " APP_ID
   read -rsp "FEISHU_APP_SECRET: " APP_SECRET; echo
-  printf 'FEISHU_APP_ID=%s\nFEISHU_APP_SECRET=%s\nMUSE_API_URL=\nMUSE_API_KEY=\n' "$APP_ID" "$APP_SECRET" > "$ENV_FILE"
+  printf 'FEISHU_APP_ID=%s\nFEISHU_APP_SECRET=%s\nMUSE_API_URL=\nMUSE_API_KEY=\nMUSE_MODEL=deepseek-chat\n' "$APP_ID" "$APP_SECRET" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "已写入 $ENV_FILE（Muse 接口地址以后再补）"
 else

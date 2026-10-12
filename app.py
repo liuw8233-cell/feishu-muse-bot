@@ -13,8 +13,9 @@ app = FastAPI()
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 # 你的 Muse 接口（按你实际用的填）
-MUSE_API_URL = os.environ.get("MUSE_API_URL", "")
+MUSE_API_URL = os.environ.get("MUSE_API_URL", "").rstrip("/")
 MUSE_API_KEY = os.environ.get("MUSE_API_KEY", "")
+MUSE_MODEL = os.environ.get("MUSE_MODEL", "deepseek-chat")
 
 # 飞书会重试推送事件，用 message_id 去重（保留最近 1000 条）
 _seen_messages = deque(maxlen=1000)
@@ -40,16 +41,23 @@ def get_tenant_token() -> str:
 
 
 def ask_muse(user_text: str) -> str:
-    # TODO: 换成你真实的 Muse 调用，这里只是占位
+    """调用 OpenAI 兼容的大模型接口。
+    DeepSeek: MUSE_API_URL=https://api.deepseek.com, MUSE_MODEL=deepseek-chat
+    Kimi:     MUSE_API_URL=https://api.moonshot.cn, MUSE_MODEL=kimi-k2 / moonshot-v1-8k
+    通义:     MUSE_API_URL=https://dashscope.aliyuncs.com/compatible-mode/v1, MUSE_MODEL=qwen-plus
+    """
     r = requests.post(
-        MUSE_API_URL,
+        f"{MUSE_API_URL}/chat/completions",
         headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
-        json={"message": user_text},
+        json={
+            "model": MUSE_MODEL,
+            "messages": [{"role": "user", "content": user_text}],
+        },
         timeout=60,
     )
     r.raise_for_status()
     data = r.json()
-    return data.get("reply", str(data))
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def reply_feishu(message_id: str, text: str) -> None:
@@ -103,10 +111,13 @@ async def webhook(req: Request):
         if not user_text:
             return {"ok": True}
 
-        try:
-            answer = ask_muse(user_text)
-        except Exception as e:  # 别让异常吞掉飞书的回调
-            answer = f"调用 Muse 出错了：{e}"
+        if not MUSE_API_URL or not MUSE_API_KEY:
+            answer = "我还没接上大模型，配置好 API Key 后我就能聊天了"
+        else:
+            try:
+                answer = ask_muse(user_text)
+            except Exception as e:  # 别让异常吞掉飞书的回调
+                answer = f"调用大模型出错了：{e}"
 
         try:
             reply_feishu(message_id, answer)
