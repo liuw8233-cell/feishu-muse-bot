@@ -22,6 +22,17 @@
 等接口 ready 了在应用详情页更新环境变量后重部署即可。
 
 ## 本地/自有服务器部署
+
+一键脚本（Ubuntu/Debian，国内 pip 源、systemd 开机自启都配好了）：
+```bash
+curl -fsSLO https://raw.githubusercontent.com/liuw8233-cell/feishu-muse-bot/main/deploy.sh
+bash deploy.sh
+```
+脚本会提示你填写 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（Muse 接口地址可先留空）。
+跑完后把域名反代到 `127.0.0.1:8000` 并配好 HTTPS（宝塔面板一键 SSL 最省事），
+再去飞书开放平台把事件订阅地址填成 `https://你的域名/webhook` 即可。
+
+手动部署：
 1. 飞书开放平台 → 自建应用 → 开通「机器人」能力
 2. 「事件订阅」添加 `im.message.receive_v1`，请求地址填 `https://你的域名/webhook`
    - 首次保存时飞书会发 `url_verification`，本模板已处理
